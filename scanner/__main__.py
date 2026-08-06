@@ -51,7 +51,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-enrich",
         action="store_true",
-        help="Skip company-description enrich on hits",
+        help="Skip company-description enrich on hits "
+        "(ignored when name/mcap/industry filters need enrich)",
+    )
+    p.add_argument(
+        "--exclude-etf",
+        action="store_true",
+        help="Drop ETFs, ETNs, CEFs, and similar fund products (post-enrich)",
+    )
+    p.add_argument(
+        "--exclude-spac",
+        action="store_true",
+        help="Drop SPACs / blank-check acquisition vehicles (post-enrich)",
+    )
+    p.add_argument(
+        "--exclude-preferred",
+        action="store_true",
+        help="Drop preferred shares (symbol .PR* or name)",
+    )
+    p.add_argument(
+        "--stocks-only",
+        action="store_true",
+        help="Shorthand: --exclude-etf --exclude-spac --exclude-preferred",
+    )
+    p.add_argument(
+        "--min-mktcap",
+        type=str,
+        default=None,
+        metavar="N",
+        help="Min market cap (dollars or suffix: 50M, 1B). Drops missing mcap.",
+    )
+    p.add_argument(
+        "--industry",
+        type=str,
+        default=None,
+        metavar="TAGS",
+        help="Comma-separated industry substrings to keep "
+        "(e.g. Auto,Software,Semiconductors)",
     )
     p.add_argument(
         "--no-tui",
@@ -64,11 +100,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write hits CSV (works with --no-tui; TUI uses key e)",
     )
+    p.add_argument(
+        "--track",
+        type=str,
+        default=None,
+        metavar="HITS_CSV",
+        help="Track performance of a prior hits CSV vs live quotes "
+        "(use with --stocks-only / --min-mktcap; skips a new scan)",
+    )
+    p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="With --track: performance CSV path "
+        "(default <input>_performance.csv)",
+    )
+    p.add_argument(
+        "--re-enrich",
+        action="store_true",
+        help="With --track: force stock-page enrich before filtering",
+    )
     return p
 
 
 def _config_from_args(args: argparse.Namespace):
+    from .filters import parse_mktcap
     from .public_client import ScanConfig
+
+    exclude_etf = bool(args.exclude_etf or args.stocks_only)
+    exclude_spac = bool(args.exclude_spac or args.stocks_only)
+    exclude_preferred = bool(args.exclude_preferred or args.stocks_only)
+    min_mcap = parse_mktcap(args.min_mktcap) if args.min_mktcap else None
+    industries = None
+    if args.industry:
+        industries = [p.strip() for p in args.industry.split(",") if p.strip()]
 
     return ScanConfig(
         mode=args.mode,
@@ -77,6 +142,11 @@ def _config_from_args(args: argparse.Namespace):
         limit=args.limit,
         min_price=args.min_price,
         enrich_hits=not args.no_enrich,
+        exclude_etf=exclude_etf,
+        exclude_spac=exclude_spac,
+        exclude_preferred=exclude_preferred,
+        min_market_cap=min_mcap,
+        industries=industries,
     )
 
 
@@ -154,9 +224,21 @@ async def run_headless(args: argparse.Namespace) -> int:
             print(f"         {hit.short_description}")
 
     print()
+    filter_bits = []
+    if config.exclude_etf:
+        filter_bits.append("no-etf")
+    if config.exclude_spac:
+        filter_bits.append("no-spac")
+    if config.exclude_preferred:
+        filter_bits.append("no-pref")
+    if config.min_market_cap:
+        filter_bits.append(f"mcap≥{config.min_market_cap:,.0f}")
+    if config.industries:
+        filter_bits.append("industry=" + "|".join(config.industries))
+    filt = f"  ·  Filters: {', '.join(filter_bits)}" if filter_bits else ""
     print(
         f"Hits: {len(state.hits)}  ·  Scanned: {state.scanned or state.total:,}  "
-        f"·  Threshold: ≤{config.threshold_pct:g}% from 52w low"
+        f"·  Threshold: ≤{config.threshold_pct:g}% from 52w low{filt}"
     )
 
     if args.csv:
@@ -169,6 +251,19 @@ async def run_headless(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.track:
+        from .performance import hit_filters_from_args, run_track
+
+        raise SystemExit(
+            asyncio.run(
+                run_track(
+                    Path(args.track),
+                    hit_filters=hit_filters_from_args(args),
+                    out_path=Path(args.out) if args.out else None,
+                    re_enrich=bool(args.re_enrich),
+                )
+            )
+        )
     if args.no_tui:
         raise SystemExit(asyncio.run(run_headless(args)))
     from .tui import run_app

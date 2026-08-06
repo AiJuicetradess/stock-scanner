@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional
 import httpx
 
 from .config import PublicCredentials
+from .filters import HitFilterConfig, filter_hits
 from .models import LowHit, ScanState
 
 USER_AGENT = (
@@ -73,6 +74,22 @@ class ScanConfig:
     enrich_hits: bool = True
     enrich_concurrency: int = 4
     progress_every: int = 25  # UI log cadence
+    # Post-scan filters (name/mcap/industry need enrich)
+    exclude_etf: bool = False
+    exclude_spac: bool = False
+    exclude_preferred: bool = False
+    min_market_cap: Optional[float] = None
+    industries: Optional[list[str]] = None  # include substrings vs industry
+
+    def hit_filters(self) -> HitFilterConfig:
+        return HitFilterConfig(
+            exclude_etf=self.exclude_etf,
+            exclude_spac=self.exclude_spac,
+            exclude_preferred=self.exclude_preferred,
+            min_market_cap=self.min_market_cap,
+            industries=list(self.industries or []),
+            industry_include=True,
+        )
 
 
 class PublicLowScanner:
@@ -279,11 +296,23 @@ class PublicLowScanner:
                     if on_update:
                         on_update(state)
 
-                # Optional description enrich via public stock pages
-                if cfg.enrich_hits and hits:
+                # Optional description enrich via public stock pages.
+                # Filters that inspect name/desc/mcap/industry force enrich on.
+                filters = cfg.hit_filters()
+                need_enrich = cfg.enrich_hits or (
+                    bool(hits) and filters.needs_enrich()
+                )
+                if need_enrich and hits:
+                    if not cfg.enrich_hits and filters.needs_enrich():
+                        state.log(
+                            "· Enabling enrich (required for active name/mcap/industry filters)"
+                        )
                     bump("enrich", f"Enriching {len(hits)} hits with company details…")
                     await self._enrich_hits(hits, state, on_update)
                     state.hits = list(hits)
+
+                hits = self._apply_hit_filters(hits, state, on_update)
+                state.hits = list(hits)
 
         except Exception as exc:  # noqa: BLE001
             state.error = str(exc)
@@ -462,6 +491,25 @@ class PublicLowScanner:
         pct = ((hit.price - hit.low_52w) / hit.low_52w) * 100.0
         return pct <= self.config.threshold_pct
 
+    def _apply_hit_filters(
+        self,
+        hits: list[LowHit],
+        state: ScanState,
+        on_update: OnUpdate,
+    ) -> list[LowHit]:
+        cfg = self.config.hit_filters()
+        if not cfg.any_active() or not hits:
+            return hits
+        kept, stats = filter_hits(hits, cfg)
+        dropped = stats.input_count - stats.kept
+        state.log(f"✓ {stats.summary()}")
+        if dropped:
+            state.log(f"· Dropped {dropped} hits via post-scan filters")
+        if on_update:
+            state.hits = list(kept)
+            on_update(state)
+        return kept
+
     # ── screener fallback ─────────────────────────────────────────────────
 
     async def _scan_screener(self, state: ScanState, *, on_update: OnUpdate) -> ScanState:
@@ -488,9 +536,19 @@ class PublicLowScanner:
         state.total = len(hits)
         state.updated_at = updated
         state.log(f"✓ Screener list: {len(hits)} names (as of {updated or 'unknown'})")
-        if self.config.enrich_hits and hits:
+        filters = self.config.hit_filters()
+        need_enrich = self.config.enrich_hits or (
+            bool(hits) and filters.needs_enrich()
+        )
+        if need_enrich and hits:
+            if not self.config.enrich_hits and filters.needs_enrich():
+                state.log(
+                    "· Enabling enrich (required for active name/mcap/industry filters)"
+                )
             await self._enrich_hits(hits, state, on_update)
             state.hits = hits
+        hits = self._apply_hit_filters(hits, state, on_update)
+        state.hits = hits
         state.finished = True
         bump("done", f"Done — {len(hits)} screener names")
         return state

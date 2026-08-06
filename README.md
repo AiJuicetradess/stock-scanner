@@ -74,7 +74,33 @@ python -m scanner --concurrency 20
 | `--min-price` | 1.0 | Skip sub-$1 last close |
 | `--concurrency` | 15 | Parallel bar requests |
 | `--limit` | none | Cap universe size |
-| `--no-enrich` | off | Skip description fetch |
+| `--no-enrich` | off | Skip description fetch (auto-on if name filters need it) |
+| `--exclude-etf` | off | Drop ETFs / ETNs / CEFs / fund products |
+| `--exclude-spac` | off | Drop SPACs / blank-check vehicles |
+| `--exclude-preferred` | off | Drop preferreds (`.PR*` / name) |
+| `--stocks-only` | off | Shorthand for the three exclude flags above |
+| `--min-mktcap` | none | Min market cap (`50000000` or `50M`) — missing mcap dropped |
+| `--industry` | none | Comma-separated industry substrings to **keep** |
+
+Post-scan filters run after enrich (name, description, industry, market cap come from the stock page). Example stocks-only full run:
+
+```powershell
+python -m scanner --no-tui --stocks-only --min-mktcap 50M --csv output\universe_lows_filtered.csv
+```
+
+## Track prior scan performance
+
+Compare a saved hits CSV to live quotes (return vs scan price, still-near-low, broke lower). Use **`--stocks-only`** so bond ETFs don’t dominate the stats:
+
+```powershell
+python -m scanner --track output\52w_lows_universe_20260803_061151.csv --stocks-only --out output\aug3_stocks_performance.csv
+```
+
+Same filters as scan (`--exclude-etf`, `--min-mktcap`, `--industry`, …). Also:
+
+```powershell
+python -m scanner.performance output\universe_lows.csv --stocks-only --min-mktcap 50M
+```
 
 ## Layout
 
@@ -86,6 +112,8 @@ stock-scanner/
     __main__.py        # CLI
     config.py          # credential load
     public_client.py   # universe + screener scan
+    filters.py         # ETF/SPAC/pref/mcap/industry
+    performance.py     # track prior CSV vs live quotes
     models.py
     tui.py
   output/              # CSV exports
